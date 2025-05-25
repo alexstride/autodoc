@@ -1,11 +1,7 @@
 use clap::{Parser, ValueHint};
 use std::path::PathBuf;
-
-mod file;
-mod directory;
-mod crawler;
-
-use crawler::Crawler;
+use autodoc::crawler::{Crawler, Directory};
+use autodoc::tree_renderer::render_directory_tree;
 
 /// List child files and/or directories of the given path.
 #[derive(Parser, Debug)]
@@ -46,20 +42,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_directory(dir: &directory::Directory, indent: usize, cli: &Cli) {
-    let indent_str = "  ".repeat(indent);
-    
-    if !cli.files_only {
-        println!("{}{}", indent_str, dir);
-    }
-    
-    if !cli.dirs_only {
-        for file in &dir.files {
-            println!("{}  {}", indent_str, file);
-        }
-    }
-    
-    for subdir in &dir.subdirectories {
-        print_directory(subdir, indent + 1, cli);
-    }
+fn print_directory(dir: &Directory, _indent: usize, cli: &Cli) {
+    let show_sizes = !(cli.dirs_only || cli.files_only); // Show sizes unless filtering
+    let tree = render_directory_tree(dir, show_sizes);
+    println!("{}", tree);
 }

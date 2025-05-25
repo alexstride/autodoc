@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use crate::file::File;
+use crate::crawler::file::File;
 
 #[derive(Debug, Clone)]
 pub struct Directory {

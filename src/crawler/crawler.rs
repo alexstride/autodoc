@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::fs;
 use std::io;
-use crate::file::File;
-use crate::directory::{Directory, DirectoryBuilder};
+use crate::crawler::file::File;
+use crate::crawler::directory::{Directory, DirectoryBuilder};
 
 pub struct Crawler {
     max_depth: Option<usize>,
