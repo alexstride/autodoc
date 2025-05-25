@@ -1,5 +1,11 @@
 use clap::{Parser, ValueHint};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
+
+mod file;
+mod directory;
+mod crawler;
+
+use crawler::Crawler;
 
 /// List child files and/or directories of the given path.
 #[derive(Parser, Debug)]
@@ -20,32 +26,40 @@ struct Cli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let path = cli.path.clone();
 
     // Fail fast if the path doesn't exist
-    if !cli.path.exists() {
-        anyhow::bail!("Path '{}' does not exist", cli.path.display());
+    if !path.exists() {
+        anyhow::bail!("Path '{}' does not exist", path.display());
     }
 
-    // If it's a single file we just echo it (unless filtered out)
-    if cli.path.is_file() {
-        if !cli.dirs_only {
-            println!("{}", cli.path.display());
-        }
-        return Ok(());
-    }
-
-    // Non-recursive directory listing
-    for entry in fs::read_dir(&cli.path)? {
-        let entry = entry?;
-        let md = entry.metadata()?;
-        let p = entry.path();
-
-        match (md.is_dir(), cli.dirs_only, cli.files_only) {
-            (true, false, true) => continue,  // dir but files-only flag
-            (false, true, false) => continue, // file but dirs-only flag
-            _ => println!("{}", p.display()),
-        }
-    }
+    // Use the virtual file tree functionality
+    let crawler = Crawler::new();
+    let directory = crawler.crawl(path)?;
+    
+    print_directory(&directory, 0, &cli);
+    
+    println!("\nSummary:");
+    println!("Total files: {}", directory.total_files());
+    println!("Total size: {} bytes", directory.total_size());
 
     Ok(())
+}
+
+fn print_directory(dir: &directory::Directory, indent: usize, cli: &Cli) {
+    let indent_str = "  ".repeat(indent);
+    
+    if !cli.files_only {
+        println!("{}{}", indent_str, dir);
+    }
+    
+    if !cli.dirs_only {
+        for file in &dir.files {
+            println!("{}  {}", indent_str, file);
+        }
+    }
+    
+    for subdir in &dir.subdirectories {
+        print_directory(subdir, indent + 1, cli);
+    }
 }
