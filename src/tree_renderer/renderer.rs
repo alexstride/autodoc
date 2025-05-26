@@ -1,4 +1,4 @@
-use crate::crawler::Directory;
+use crate::{common::units::format_bytes, crawler::Directory};
 
 pub fn render_directory_tree(directory: &Directory, show_sizes: bool) -> String {
     let mut output = String::new();
@@ -19,7 +19,7 @@ fn render_directory_recursive(
     output.push('/');
 
     if show_sizes {
-        output.push_str(&format!(" ({}B)", directory.total_size()));
+        output.push_str(&format!(" ({})", format_bytes(directory.total_size())));
     }
     output.push('\n');
 
@@ -29,7 +29,7 @@ fn render_directory_recursive(
         output.push_str("    ├── ");
         output.push_str(&file.name);
         if show_sizes {
-            output.push_str(&format!(" ({}B)", file.size));
+            output.push_str(&format!(" ({})", format_bytes(file.size)));
         }
         output.push('\n');
     }

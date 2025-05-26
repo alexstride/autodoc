@@ -1,5 +1,5 @@
 #[cfg(test)]
-use crate::{File, DirectoryBuilder, Crawler};
+use crate::crawler::{File, DirectoryBuilder, Crawler};
 #[cfg(test)]
 use std::path::PathBuf;
 

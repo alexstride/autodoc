@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::fs;
 use std::io;
+use crate::common::units::format_bytes;
 
 #[derive(Debug, Clone)]
 pub struct File {
@@ -31,6 +32,6 @@ impl File {
 
 impl std::fmt::Display for File {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({}B)", self.name, self.size)
+        write!(f, "{} ({})", self.name, format_bytes(self.size))
     }
 }

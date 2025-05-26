@@ -1,7 +1,11 @@
+pub mod crawler;
+pub mod tree_renderer;
+pub mod common;
+
 use clap::{Parser, ValueHint};
 use std::path::PathBuf;
-use autodoc::crawler::{Crawler, Directory};
-use autodoc::tree_renderer::render_directory_tree;
+use crawler::{Crawler, Directory};
+use tree_renderer::render_directory_tree;
 
 /// List child files and/or directories of the given path.
 #[derive(Parser, Debug)]

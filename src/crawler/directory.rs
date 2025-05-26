@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use crate::crawler::file::File;
+use crate::common::units::format_bytes;
 
 #[derive(Debug, Clone)]
 pub struct Directory {
@@ -24,7 +25,7 @@ impl Directory {
 
 impl std::fmt::Display for Directory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/", self.name)
+        write!(f, "{}/ (total: {})", self.name, format_bytes(self.total_size()))
     }
 }
 
