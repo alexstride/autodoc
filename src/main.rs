@@ -77,7 +77,7 @@ struct ADFile {
 }
 
 #[derive(Debug, Clone)]
-struct ADPrompt(Arc<String>);
+struct ADPrompt(String);
 
 impl ADPrompt {
     pub fn as_str(&self) -> &str {
@@ -85,7 +85,7 @@ impl ADPrompt {
     }
 }
 #[derive(Debug, Clone)]
-struct ADSummary(Arc<String>);
+struct ADSummary(String);
 
 impl ADSummary {
     pub fn as_str(&self) -> &str {
@@ -116,12 +116,37 @@ enum PromptSection {
 // It will also contain information about target_path (PathBuf) and summary_destination, which will be of INLINE, or NEW_FILE type and will also contain a PathBuf
 // It will also contain a hash of the previous prompt which could, in future, be used to prevent re-running executions which don't need to be run
 // Note: This change will need to be propagated through all of the match arms in the execute_plan function.
+
+/// Context for execution steps
+struct ExecutionStepContext {
+    /// The prompt sections used to build the prompt
+    prompt_sections: Vec<PromptSection>,
+    /// The built prompt
+    prompt: Option<Arc<ADPrompt>>,
+    /// The generated summary
+    summary: Option<Arc<ADSummary>>,
+    /// The target path for this step
+    target_path: PathBuf,
+    /// Where to place the summary
+    summary_destination: SummaryDestination,
+    /// Hash of the previous prompt (for caching)
+    previous_prompt_hash: String,
+}
+
+/// Destination type for summaries
+enum SummaryDestination {
+    /// Summary will be placed inline in the file
+    INLINE(PathBuf),
+    /// Summary will be placed in a new file at the specified path
+    NEW_FILE(PathBuf),
+}
+
 enum ExecutionStep {
-    AwaitingPrompt(Vec<PromptSection>),
-    PendingExecution(ADPrompt),
-    Executing (ADPrompt),
-    PendingSave(ADSummary),
-    Done(ADSummary)
+    AwaitingPrompt(ExecutionStepContext),
+    PendingExecution(ExecutionStepContext),
+    Executing(ExecutionStepContext),
+    PendingSave(ExecutionStepContext),
+    Done(ExecutionStepContext)
 }
 
 async fn execute_plan<SummaryFut, SaveFut>(
@@ -150,20 +175,19 @@ async fn execute_plan<SummaryFut, SaveFut>(
         for step in &mut mutable_steps {
             let mut step_guard = step.lock().await;
             match &mut *step_guard {
-                ExecutionStep::AwaitingPrompt(prompt_sections) => {
+                ExecutionStep::AwaitingPrompt(mut context) => {
                     let mut remaining_placeholders = 0;
-                    // Try to resolve any placeholders in the prompt
-                    // If the prompt section is a string, nothing to do
-                    // If the prompt section is a placeholder, holding a pointer, follow the pointer
-                    // to check if the execution step is PendingSave or Done, and if so, resolve the prompt string
-                    for section in prompt_sections.iter_mut() {
+                    // Resolve placeholders in the prompt sections
+                    for section in context.prompt_sections.iter_mut() {
                         match section {
                             PromptSection::StaticString(_) => (),
                             PromptSection::Placeholder(wrapped_step_pointer) => {
                                 let resolved_text = {
                                     let inner_step_guard = wrapped_step_pointer.lock().await;
                                     match &*inner_step_guard {
-                                        ExecutionStep::PendingSave(summary) | ExecutionStep::Done(summary) => Some(summary.as_str().to_string()),
+                                        ExecutionStep::PendingSave(summary_ctx) | ExecutionStep::Done(summary_ctx) => {
+                                            summary_ctx.summary.as_ref().map(|s| s.as_str().to_string())
+                                        },
                                         _ => None
                                     }
                                 };
@@ -176,44 +200,43 @@ async fn execute_plan<SummaryFut, SaveFut>(
                         }
                     }
                     if remaining_placeholders == 0 {
-                        let prompt = join_prompt_sections(&prompt_sections);
-                        *step_guard = ExecutionStep::PendingExecution(prompt)
+                        let prompt = join_prompt_sections(&context.prompt_sections);
+                        context.prompt = Some(prompt.into());
+                        *step_guard = ExecutionStep::PendingExecution(context);
                     }
                 },
-                ExecutionStep::PendingExecution(prompt) => {
-                    // Clone what the async task needs *before* we move out
+                ExecutionStep::PendingExecution(mut context) => {
+                    let prompt = context.prompt.as_ref().expect("Prompt should be set in PendingExecution state");
                     let prompt_clone = prompt.clone();
-                    let step_clone   = step.clone();
+                    let step_clone = step.clone();
 
-                    // Spawn a detached task – it will update the step later
+                    // Spawn a detached task to get the summary
                     tokio::spawn(async move {
                         let summary = get_summary(prompt_clone.as_str()).await;
-
-                        // 2a) Mark the step as PendingSave
-                        {
-                            let mut s = step_clone.lock().await;
-                            *s = ExecutionStep::PendingSave(summary);
+                        
+                        let mut s = step_clone.lock().await;
+                        if let ExecutionStep::PendingExecution(mut ctx) = &mut *s {
+                            ctx.summary = Some(summary.into());
+                            *s = ExecutionStep::PendingSave(ctx);
                         }
-
-                        // TODO: Call on_update with the update
                     });
-                    *step_guard = ExecutionStep::Executing(prompt.clone());
+                    *step_guard = ExecutionStep::Executing(context);
                 },
                 ExecutionStep::Executing(_) => (),
-                ExecutionStep::PendingSave(summary) => {
-                    // 1. Persist the summary (await inside the loop is fine: we hold
-                    //    the mutex only around the assignment below, not the write).
+                ExecutionStep::PendingSave(mut context) => {
+                    let summary = context.summary.as_ref().expect("Summary should be set in PendingSave state");
+                    
+                    // Persist the summary
                     if let Err(e) = save_summary(summary.as_str()).await {
                         eprintln!("failed to save summary: {e}");
-                        continue;          // try again next tick
+                        continue;  // try again next tick
                     }
-    
-                    // 2. Notify the outside world.
-                    // TODO: Make call the update callback
+                    
+                    // Notify the outside world
+                    // TODO: Call on_update with the update
                     // on_update(repo_after_save(summary));
-    
-                    // 3. Move the summary into Done
-                    *step_guard = ExecutionStep::Done(summary.clone());
+                    
+                    *step_guard = ExecutionStep::Done(context);
                 },
                 ExecutionStep::Done(_) => {
                     done_steps += 1;
