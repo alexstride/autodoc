@@ -8,7 +8,7 @@ pub mod common;
 pub mod autodoc;
 
 use clap::{Parser, ValueHint};
-use std::{collections::HashMap, path::PathBuf, thread, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}, thread, time::Duration};
 // use crawler::{Crawler, Directory};
 // use tree_renderer::render_directory_tree;
 use autodoc::{AutodocConfig};
@@ -75,8 +75,6 @@ struct ADFile {
     summary: Option<ADSummary>
 }
 
-struct ADSummary(String);
-
 fn load_repo(repo_root: PathBuf, config: &AutodocConfig) -> ADRepo {
     todo!("implement a function which crawls the whole repo and loads it into the ADRepo dataclass")
 }
@@ -84,42 +82,208 @@ fn load_repo(repo_root: PathBuf, config: &AutodocConfig) -> ADRepo {
 struct TreeNodePlan {
     
 }
-struct ADPlan<'a>(Vec<ExecutionStep<'a>>);
 
 fn create_plan(repo: ADRepo, start_path: &PathBuf, config: &AutodocConfig) -> ADPlan {
     todo!("Implement a function which takes the repo and the start path and uses it to create an execution plan")
 }
 
-enum ExecutionStatus {
-    AwaitingPrompt,
-    PendingExecution,
-    Executing,
-    PendingSave,
-    Done
-}
+#[derive(Debug, Clone)]
+struct ADPrompt(String);
+#[derive(Debug, Clone)]
+struct ADSummary(String);
 
-enum PromptSection<'a> {
+
+#[derive(Debug)]
+enum PromptSection {
     StaticString(String),
-    Placeholder(&'a ExecutionStep<'a>)
-}
-struct ExecutionStep<'a> {
-    status: ExecutionStatus,
-    prompt_sections: Vec<PromptSection<'a>>
+    Placeholder(Arc<Mutex<ExecutionStep>>)
 }
 
-fn execute_plan(
+enum ExecutionStep {
+    AwaitingPrompt(Vec<PromptSection>),
+    PendingExecution(ADPrompt),
+    Executing (ADPrompt),
+    PendingSave(ADSummary),
+    Done(ADSummary)
+}
+
+// fn execute_plan(
+//     mut plan: Vec<ExecutionStep>,
+//     config: &AutodocConfig,
+//     on_update: fn(ADRepo) -> (),
+//     get_summary: fn(String) -> ADSummary
+// ) -> () {
+//     let is_complete = false;
+//     // Assume that the ADPlan is a list of execution steps. We have taken ownership of the plan and will use it
+//     // as the internal 
+//     // Loop over all of the values in the hashmap and find the first one which is in a state which can be progressed
+//     while (!is_complete) {
+//         thread::sleep(Duration::from_millis(100));
+//         for step in &mut plan {
+//             match step {
+//                 ExecutionStep::AwaitingPrompt(prompt_sections) => {
+//                     let mut remaining_placeholders = 0;
+//                     // Try to resolve any placeholders in the prompt
+//                     // If the prompt section is a string, nothing to do
+//                     // If the prompt section is a placeholder, holding a pointer, follow the pointer
+//                     // to check if the execution step is PendingSave or Done, and if so, resolve the prompt string
+//                     for section in prompt_sections {
+//                         match section {
+//                             PromptSection::StaticString(_) => (),
+//                             PromptSection::Placeholder(arc_mutex_step) => {
+//                                 let step_guard = arc_mutex_step.lock().unwrap();
+//                                 match &*step_guard {
+//                                     ExecutionStep::PendingSave(summary) | ExecutionStep::Done(summary) => {
+//                                         *section = PromptSection::StaticString(summary.0.clone())
+//                                     }
+//                                     _ => remaining_placeholders += 1
+//                                 }
+//                             },
+//                         }
+//                     }
+//                     if remaining_placeholders == 0 {
+//                         let prompt = join_prompt_sections(&prompt_sections);
+//                         *step = ExecutionStep::PendingExecution(prompt)
+//                     }
+//                 },
+//                 ExecutionStep::PendingExecution(prompt) => {
+//                     // TODO
+//                     // Kick off a request to get a summary async, but then move on. Queue up a callback to update the step when 
+//                 }
+//             }
+//         }
+//     }
+// }
+
+
+/// Signature:
+///   * `plan`        – shared, mutable execution steps
+///   * `config`      – unchanged, read-only
+///   * `on_update`   – called each time a step reaches `Done`
+///   * `get_summary` – async closure that talks to your LLM
+pub async fn execute_plan<
+    FGet, FutGet, 
+    FUpdate
+>(
     plan: ADPlan,
-    config: &AutodocConfig,
-    on_update: fn(ADRepo) -> (),
-    get_summary: fn(String) -> ADSummary
-) -> () {
-    let is_complete = false;
-    // Assume that the ADPlan is a list of execution steps
-    // Loop over all of the values in the hashmap and find the first one which is in a state which can be progressed
-    while (!is_complete) {
-        thread::sleep(Duration::from_millis(100));
-        
+    _config: Arc<AutodocConfig>,
+    on_update: FUpdate,
+    get_summary: FGet,
+) 
+where
+    // async get-summary callback
+    FGet:     Fn(String) -> FutGet + Send + Sync + 'static,
+    FutGet:   std::future::Future<Output = ADSummary> + Send + 'static,
+    // repo-update callback (could also be async if you need)
+    FUpdate:  Fn(ADRepo) + Send + Sync + 'static,
+{
+    loop {
+        let mut progressed_this_tick = false;
+
+        // Walk every step once per tick.
+        // Each branch must hold its lock for the **shortest** time possible.
+        for step in &plan {
+            // ‼️ lock for this step
+            let mut guard = step.lock().await;
+
+            match &mut *guard {
+                //-----------------------------------------------------------------
+                // 1️⃣  AwaitingPrompt  ➜  PendingExecution
+                //-----------------------------------------------------------------
+                ExecutionStep::AwaitingPrompt(sections) => {
+                    let mut unresolved = 0;
+
+                    for section in sections.iter_mut() {
+                        if let PromptSection::Placeholder(ref target) = section {
+                            let target_guard = target.lock().await;
+                            match &*target_guard {
+                                ExecutionStep::PendingSave(sum)
+                                | ExecutionStep::Done(sum) => {
+                                    *section = PromptSection::StaticString(sum.0.clone());
+                                }
+                                _ => unresolved += 1,
+                            }
+                        }
+                    }
+
+                    if unresolved == 0 {
+                        let prompt = join_prompt_sections(sections);
+                        *guard = ExecutionStep::PendingExecution(prompt);
+                        progressed_this_tick = true;
+                    }
+                }
+
+                //-----------------------------------------------------------------
+                // 2️⃣  PendingExecution  ➜  Executing  (spawn LLM call)
+                //-----------------------------------------------------------------
+                ExecutionStep::PendingExecution(prompt) => {
+                    let prompt_clone = prompt.clone();
+                    *guard = ExecutionStep::Executing(prompt.clone());
+                    progressed_this_tick = true;
+
+                    // Clone what the async task needs *before* we move out
+                    let step_clone   = Arc::clone(step);
+                    let on_update    = &on_update;
+                    let get_summary  = &get_summary;
+
+                    // Spawn a detached task – it will update the step later
+                    tokio::spawn(async move {
+                        let summary = get_summary(prompt_clone.0).await;
+
+                        // 2a) Mark the step as PendingSave
+                        {
+                            let mut s = step_clone.lock().await;
+                            *s = ExecutionStep::PendingSave(summary.clone());
+                        }
+
+                        // 2b) Persist and finally mark Done
+                        // (You could do actual I/O here; for demo just flip state)
+                        {
+                            let mut s = step_clone.lock().await;
+                            *s = ExecutionStep::Done(summary.clone());
+                        }
+
+                        // 2c) Notify caller
+                        on_update(dummy_repo(summary));
+                    });
+                }
+
+                //-----------------------------------------------------------------
+                // 3️⃣  Anything else – nothing to do inside main loop
+                //-----------------------------------------------------------------
+                _ => {}
+            }
+        }
+
+        // ── exit when every step is Done ────────────────────────────────────────
+        if plan.iter()
+               .all(|s| matches!(*s.blocking_lock(), ExecutionStep::Done(_)))
+        {
+            break;
+        }
+
+        // If no state changes we pause briefly
+        if !progressed_this_tick {
+            sleep(Duration::from_millis(100)).await;
+        }
     }
+}
+
+
+fn join_prompt_sections(sections: &[PromptSection]) -> ADPrompt {
+    let combined = sections
+        .iter()
+        .map(|section| {
+            if let PromptSection::StaticString(s) = section {
+                s
+            } else {
+                panic!("Unresolved placeholder in prompt sections")
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ADPrompt(combined)
 }
 
 fn on_repo_update(repo: ADRepo) -> () {
