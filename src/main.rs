@@ -8,7 +8,7 @@ pub mod common;
 pub mod autodoc;
 
 use clap::{Parser, ValueHint};
-use std::{collections::HashMap, path::PathBuf, sync::{Arc}, thread, time::Duration};
+use std::{collections::HashMap, error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 use tokio::sync::Mutex;
 // use crawler::{Crawler, Directory};
 // use tree_renderer::render_directory_tree;
@@ -112,6 +112,10 @@ enum PromptSection {
     Placeholder(Arc<Mutex<ExecutionStep>>)
 }
 
+// TODO: All of these should now pass through a special ExecutionStepContext struct, which saves all of the prompt steps, the prompt and the summary.
+// It will also contain information about target_path (PathBuf) and summary_destination, which will be of INLINE, or NEW_FILE type and will also contain a PathBuf
+// It will also contain a hash of the previous prompt which could, in future, be used to prevent re-running executions which don't need to be run
+// Note: This change will need to be propagated through all of the match arms in the execute_plan function.
 enum ExecutionStep {
     AwaitingPrompt(Vec<PromptSection>),
     PendingExecution(ADPrompt),
@@ -120,12 +124,16 @@ enum ExecutionStep {
     Done(ADSummary)
 }
 
-async fn execute_plan<SummaryFut>(
+async fn execute_plan<SummaryFut, SaveFut>(
     mut plan: Vec<ExecutionStep>,
     config: &AutodocConfig,
     on_update: fn(ADRepo) -> (),
-    get_summary: fn(&str) -> SummaryFut
-) where SummaryFut: std::future::Future<Output = ADSummary> + Send + Sync + 'static {
+    get_summary: fn(&str) -> SummaryFut,
+    save_summary: fn(&str) -> SaveFut,
+) where 
+    SummaryFut: std::future::Future<Output = ADSummary> + Send + Sync + 'static,
+    SaveFut: Future<Output = anyhow::Result<()>> + Send + 'static
+{
     let mut is_complete = false;
     // Assume that the ADPlan is a list of execution steps. We have taken ownership of the plan and will use it
     // as the internal list
@@ -176,8 +184,6 @@ async fn execute_plan<SummaryFut>(
                     // Clone what the async task needs *before* we move out
                     let prompt_clone = prompt.clone();
                     let step_clone   = step.clone();
-                    let on_update    = &on_update;
-                    let get_summary  = &get_summary;
 
                     // Spawn a detached task – it will update the step later
                     tokio::spawn(async move {
@@ -197,7 +203,7 @@ async fn execute_plan<SummaryFut>(
                 ExecutionStep::PendingSave(summary) => {
                     // 1. Persist the summary (await inside the loop is fine: we hold
                     //    the mutex only around the assignment below, not the write).
-                    if let Err(e) = persist_summary(summary, config).await {
+                    if let Err(e) = save_summary(summary.as_str()).await {
                         eprintln!("failed to save summary: {e}");
                         continue;          // try again next tick
                     }
